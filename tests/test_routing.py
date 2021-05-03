@@ -622,3 +622,21 @@ def test_partial_async_endpoint():
     cls_method_response = test_client.get("/cls")
     assert cls_method_response.status_code == 200
     assert cls_method_response.json() == {"arg": "foo"}
+
+
+async def simple_route(request):
+    return JSONResponse({"Hello": "World!"})
+
+
+simple_route_app = Router(
+    routes=[
+        Route("/path", simple_route),
+    ]
+)
+
+
+def test_simple_route_redirect():
+    test_client = TestClient(simple_route_app)
+    response = test_client.get("/path/")
+    assert response.status_code == 200
+    assert response.json() == {"Hello": "World!"}

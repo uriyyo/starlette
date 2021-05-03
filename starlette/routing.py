@@ -472,6 +472,11 @@ class Router:
         lifespan: typing.Callable[[typing.Any], typing.AsyncGenerator] = None,
     ) -> None:
         self.routes = [] if routes is None else list(routes)
+        self.simple_routes: typing.Dict[
+            str, typing.Dict[str, typing.Union[Route, WebSocketRoute]]
+        ] = {}
+        for route in self.routes:
+            self._add_simple_route(route)
         self.redirect_slashes = redirect_slashes
         self.default = self.not_found if default is None else default
         self.on_startup = [] if on_startup is None else list(on_startup)
@@ -571,6 +576,13 @@ class Router:
 
         partial = None
 
+        simple_route, child_scope = self._get_simple_route(scope)
+
+        if simple_route is not None:
+            scope.update(child_scope)
+            await simple_route.handle(scope, receive, send)
+            return
+
         for route in self.routes:
             # Determine if any route matches the incoming scope,
             # and hand over to the matching route if found.
@@ -598,6 +610,13 @@ class Router:
             else:
                 redirect_scope["path"] = redirect_scope["path"] + "/"
 
+            simple_route, child_scope = self._get_simple_route(redirect_scope)
+
+            if simple_route is not None:
+                redirect_scope.update(child_scope)
+                await simple_route.handle(redirect_scope, receive, send)
+                return
+
             for route in self.routes:
                 match, child_scope = route.matches(redirect_scope)
                 if match != Match.NONE:
@@ -621,6 +640,55 @@ class Router:
         route = Host(host, app=app, name=name)
         self.routes.append(route)
 
+    def _add_simple_route(self, route: BaseRoute) -> None:
+        if not isinstance(route, (Route, WebSocketRoute)) or route.param_convertors:
+            return None
+
+        simple_route = typing.cast(typing.Union[Route, WebSocketRoute], route)
+        route_cls: typing.Type[typing.Any]
+        if isinstance(simple_route, Route):
+            route_type = "http"
+            route_cls = Route
+        else:
+            route_type = "websocket"
+            route_cls = WebSocketRoute
+
+        # Check if this route can be handled with existing routes.
+        if any(
+            r is not simple_route
+            and isinstance(r, route_cls)
+            and r.path_regex.match(simple_route.path_format) is not None  # type: ignore
+            for r in self.routes
+        ):
+            return None
+
+        self.simple_routes.setdefault(route_type, {})
+        self.simple_routes[route_type][simple_route.path_format] = simple_route
+
+    def _get_simple_route(
+        self, scope: Scope
+    ) -> typing.Tuple[typing.Optional[typing.Union[Route, WebSocketRoute]], Scope]:
+        group = self.simple_routes.get(scope["type"])
+
+        if group is None:
+            return None, {}
+
+        route = group.get(scope["path"])
+
+        if route is None:
+            return None, {}
+
+        if scope["type"] == "http":
+            methods = typing.cast(Route, route).methods
+
+            if methods is None or scope["method"] not in methods:
+                return None, {}
+
+        return route, {
+            "endpoint": route.endpoint,
+            "path_params": scope.get("path_params", {}),
+        }
+
     def add_route(
         self,
         path: str,
@@ -637,12 +705,14 @@ class Router:
             include_in_schema=include_in_schema,
         )
         self.routes.append(route)
+        self._add_simple_route(route)
 
     def add_websocket_route(
         self, path: str, endpoint: typing.Callable, name: str = None
     ) -> None:
         route = WebSocketRoute(path, endpoint=endpoint, name=name)
         self.routes.append(route)
+        self._add_simple_route(route)
 
     def route(
         self,
